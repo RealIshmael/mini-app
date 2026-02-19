@@ -1,0 +1,539 @@
+
+import React, { useState, useRef, useCallback } from 'react';
+import { VoiceName, GeneratedAudio, ConversationTurn, VoiceStyle } from './types';
+import { geminiTTS } from './services/geminiService';
+import { VOICES } from './constants';
+import VoiceSelector from './components/VoiceSelector';
+import AudioCard from './components/AudioCard';
+
+const MAX_CHARS = 5000;
+
+const App: React.FC = () => {
+  const [text, setText] = useState('');
+  const [inputModality, setInputModality] = useState<'text' | 'audio'>('text');
+  const [selectedVoice, setSelectedVoice] = useState<VoiceName>('Kore');
+  const [voiceStyle, setVoiceStyle] = useState<VoiceStyle>({ tone: 'Professional', persona: '' });
+  const [history, setHistory] = useState<GeneratedAudio[]>([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<'single' | 'conversation'>('single');
+  
+  // Recording state (for input modality and voice cloning)
+  const [isRecordingInput, setIsRecordingInput] = useState(false);
+  const [isRecordingClone, setIsRecordingClone] = useState(false);
+  const [sourceAudio, setSourceAudio] = useState<{ data: string; mimeType: string } | null>(null);
+  
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+
+  const startRecording = async (type: 'input' | 'clone') => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      chunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onloadend = () => {
+          const base64data = (reader.result as string).split(',')[1];
+          const audioData = { data: base64data, mimeType: 'audio/webm' };
+          
+          if (type === 'clone') {
+            setVoiceStyle(prev => ({ ...prev, voiceSample: audioData }));
+            setSelectedVoice('Custom_Clone');
+          } else {
+            setSourceAudio(audioData);
+          }
+        };
+      };
+
+      recorder.start();
+      if (type === 'input') setIsRecordingInput(true);
+      else setIsRecordingClone(true);
+    } catch (err) {
+      console.error("Recording failed:", err);
+      setError("Microphone access denied or not supported.");
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+      setIsRecordingInput(false);
+      setIsRecordingClone(false);
+      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+    }
+  };
+
+  const handleGenerate = async () => {
+    if (mode === 'single' && inputModality === 'text' && !text.trim()) return;
+    if (mode === 'single' && inputModality === 'audio' && !sourceAudio) {
+      setError("Please record source audio first.");
+      return;
+    }
+    
+    setIsGenerating(true);
+    setError(null);
+    
+    try {
+      let buffer: AudioBuffer;
+      let usedText: string;
+      let usedVoice: VoiceName;
+
+      if (mode === 'single') {
+        buffer = await geminiTTS.generateSingleSpeaker(text, selectedVoice, voiceStyle, sourceAudio || undefined);
+        usedText = inputModality === 'text' ? text : "Audio-to-Audio Synthesis";
+        usedVoice = selectedVoice;
+      } else {
+        buffer = await geminiTTS.generateMultiSpeaker([convTurn1, convTurn2]);
+        usedText = `Conversation: ${convTurn1.speaker} & ${convTurn2.speaker}`;
+        usedVoice = 'Kore'; 
+      }
+      
+      const newAudio: GeneratedAudio = {
+        id: crypto.randomUUID(),
+        text: usedText,
+        voice: usedVoice,
+        style: mode === 'single' ? { ...voiceStyle } : undefined,
+        timestamp: Date.now(),
+        audioBuffer: buffer,
+      };
+      
+      setHistory(prev => [newAudio, ...prev]);
+      if (mode === 'single' && inputModality === 'text') setText('');
+      setSourceAudio(null);
+    } catch (err: any) {
+      setError(err.message || 'Synthesis failed. Please try again.');
+      console.error(err);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const deleteHistoryItem = (id: string) => {
+    setHistory(prev => prev.filter(item => item.id !== id));
+  };
+
+  const tones: VoiceStyle['tone'][] = ['Professional', 'Narrative', 'Cheerful', 'Somber', 'Dramatic'];
+
+  // Conversation state
+  const [convTurn1, setConvTurn1] = useState<ConversationTurn>({ speaker: 'Joe', voice: 'Puck', text: 'Hey there! How are you doing today?' });
+  const [convTurn2, setConvTurn2] = useState<ConversationTurn>({ speaker: 'Jane', voice: 'Kore', text: "I'm doing great! Just testing out this new AI voice technology." });
+
+  return (
+    <div className="min-h-screen pb-20 bg-slate-50">
+      <header className="sticky top-0 z-50 glass-morphism py-4 border-b border-slate-200">
+        <div className="container mx-auto px-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-indigo-700 rounded-xl flex items-center justify-center text-white shadow-lg shadow-blue-200">
+              <i className="fas fa-waveform text-lg"></i>
+            </div>
+            <div className="flex flex-col">
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-700 to-indigo-900">
+                  Gemini Voice Studio
+                </h1>
+                <span className="bg-gradient-to-r from-amber-400 to-orange-500 text-[10px] font-black text-white px-1.5 py-0.5 rounded shadow-sm">PRO</span>
+              </div>
+              <span className="text-[10px] text-slate-400 font-bold tracking-widest uppercase">Native Multimodal Studio</span>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button 
+              onClick={() => setMode('single')}
+              className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                mode === 'single' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              Solo Studio
+            </button>
+            <button 
+              onClick={() => setMode('conversation')}
+              className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                mode === 'conversation' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              Dialogue
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="container mx-auto px-4 mt-8 max-w-5xl">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          <div className="lg:col-span-7 space-y-6">
+            <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-3 flex gap-2">
+                 <span className="flex items-center gap-1.5 px-2 py-1 bg-amber-50 text-[10px] font-bold text-amber-600 rounded-full border border-amber-100 uppercase tracking-tighter shadow-sm">
+                   <i className="fas fa-infinity text-[8px]"></i>
+                   Unlimited
+                 </span>
+                 <span className="flex items-center gap-1.5 px-2 py-1 bg-blue-50 text-[10px] font-bold text-blue-600 rounded-full border border-blue-100 uppercase tracking-tighter shadow-sm">
+                   <i className="fas fa-microphone-lines text-[8px]"></i>
+                   Audio Modality
+                 </span>
+              </div>
+
+              <div className="mb-6 flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-800">
+                    {mode === 'single' ? 'Studio Synthesis' : 'Dialogue Synthesis'}
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-1">Professional Audio Production • Multimodal Enabled</p>
+                </div>
+                
+                {mode === 'single' && (
+                  <div className="flex bg-slate-100 p-1 rounded-xl">
+                    <button 
+                      onClick={() => setInputModality('text')}
+                      className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${inputModality === 'text' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}
+                    >
+                      Text
+                    </button>
+                    <button 
+                      onClick={() => setInputModality('audio')}
+                      className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${inputModality === 'audio' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}
+                    >
+                      Audio
+                    </button>
+                  </div>
+                )}
+              </div>
+              
+              {mode === 'single' ? (
+                <div className="space-y-6">
+                  {inputModality === 'text' ? (
+                    <div className="relative">
+                      <textarea
+                        value={text}
+                        onChange={(e) => setText(e.target.value)}
+                        placeholder="Type or paste what you want the AI to say..."
+                        className="w-full h-64 p-5 rounded-2xl border border-slate-700 bg-slate-900 focus:ring-4 focus:ring-slate-700 focus:border-blue-500 transition-all resize-none text-white placeholder:text-slate-500 shadow-inner text-lg font-normal leading-relaxed"
+                        maxLength={MAX_CHARS}
+                      />
+                      <div className="absolute bottom-4 right-4 text-[10px] font-mono text-slate-500 bg-slate-800/50 px-2 py-1 rounded-md">
+                        {text.length.toLocaleString()} / {MAX_CHARS.toLocaleString()}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="h-64 bg-slate-900 rounded-2xl border border-slate-700 flex flex-col items-center justify-center space-y-6 relative overflow-hidden">
+                      <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 via-purple-500 to-indigo-500 opacity-20"></div>
+                      
+                      <div className={`w-20 h-20 rounded-full flex items-center justify-center text-3xl transition-all ${isRecordingInput ? 'bg-red-500 text-white animate-pulse scale-110' : 'bg-blue-600 text-white hover:bg-blue-500 cursor-pointer shadow-lg shadow-blue-900/40'}`}
+                           onClick={() => isRecordingInput ? stopRecording() : startRecording('input')}>
+                        <i className={`fas ${isRecordingInput ? 'fa-stop' : 'fa-microphone'}`}></i>
+                      </div>
+                      
+                      <div className="text-center">
+                        <h4 className="text-white font-bold mb-1 uppercase tracking-widest text-xs">
+                          {isRecordingInput ? 'Recording Source...' : 'Record Source Speech'}
+                        </h4>
+                        <p className="text-slate-400 text-[10px] max-w-xs px-10">
+                          {isRecordingInput ? 'The model will analyze your voice input modality in real-time.' : 'Record the speech you want to convert into a studio-grade voice.'}
+                        </p>
+                      </div>
+
+                      {sourceAudio && !isRecordingInput && (
+                        <div className="flex items-center gap-3 bg-blue-500/10 border border-blue-500/20 px-4 py-2 rounded-full mt-4">
+                          <i className="fas fa-waveform text-blue-400 animate-pulse"></i>
+                          <span className="text-[10px] font-black text-blue-400 uppercase tracking-widest">Source Clip Ready</span>
+                          <button onClick={() => setSourceAudio(null)} className="text-slate-500 hover:text-red-400">
+                            <i className="fas fa-trash-can text-[10px]"></i>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="bg-slate-900 rounded-2xl p-5 border border-slate-700 shadow-inner space-y-6">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-white text-xs font-black uppercase tracking-[0.2em] flex items-center gap-2">
+                        <i className="fas fa-flask text-blue-400"></i>
+                        Studio Voice Lab
+                      </h3>
+                      <div className="flex gap-2">
+                        <span className="bg-blue-500/10 text-blue-400 text-[9px] px-2 py-0.5 rounded border border-blue-500/20 font-bold uppercase tracking-tighter">Pro Customizer</span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="space-y-4">
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Voice Persona & Style</label>
+                        <div className="grid grid-cols-3 gap-1">
+                          {tones.map(t => (
+                            <button
+                              key={t}
+                              onClick={() => setVoiceStyle({...voiceStyle, tone: t})}
+                              className={`py-2 rounded-lg text-[9px] font-bold transition-all border ${
+                                voiceStyle.tone === t 
+                                ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-500/20' 
+                                : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              {t}
+                            </button>
+                          ))}
+                        </div>
+                        <input 
+                          value={voiceStyle.persona}
+                          onChange={e => setVoiceStyle({...voiceStyle, persona: e.target.value})}
+                          placeholder="Character traits (e.g. Raspy, Calm)"
+                          className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-xs text-blue-100 placeholder:text-slate-600 focus:ring-1 focus:ring-blue-500 outline-none"
+                        />
+                      </div>
+
+                      <div className="bg-slate-800/50 rounded-xl border border-slate-700 p-4 flex flex-col justify-center items-center text-center space-y-3 relative overflow-hidden">
+                        <div className="absolute top-0 right-0 w-16 h-16 bg-blue-500/5 rounded-bl-full"></div>
+                        <h4 className="text-slate-300 text-[10px] font-black uppercase tracking-widest">Voice Cloning Sample</h4>
+                        
+                        {isRecordingClone ? (
+                          <div className="flex flex-col items-center">
+                            <div className="flex gap-1 mb-2">
+                              {[1,2,3,4,5].map(i => <div key={i} className="w-1.5 h-6 bg-amber-500 animate-pulse rounded-full"></div>)}
+                            </div>
+                            <button 
+                              onClick={stopRecording}
+                              className="bg-amber-500 hover:bg-amber-600 text-white text-[9px] font-black py-1 px-4 rounded-full uppercase transition-all"
+                            >
+                              Capture
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col items-center space-y-2">
+                            <button 
+                              onClick={() => startRecording('clone')}
+                              className="bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-black py-2 px-6 rounded-full uppercase transition-all border border-slate-600"
+                            >
+                              <i className="fas fa-microphone mr-2"></i>
+                              Record Sample
+                            </button>
+                            <p className="text-[9px] text-slate-500">Provide a 5s vocal reference</p>
+                          </div>
+                        )}
+
+                        {voiceStyle.voiceSample && !isRecordingClone && (
+                          <div className="flex items-center gap-2 bg-green-500/10 border border-green-500/20 px-3 py-1 rounded-full">
+                            <i className="fas fa-check-circle text-green-500 text-[10px]"></i>
+                            <span className="text-[9px] font-bold text-green-400 uppercase">Cloning Active</span>
+                            <button 
+                              onClick={() => {
+                                setVoiceStyle(prev => ({ ...prev, voiceSample: undefined }));
+                                if (selectedVoice === 'Custom_Clone') setSelectedVoice('Kore');
+                              }}
+                              className="text-slate-500 hover:text-red-400"
+                            >
+                              <i className="fas fa-times text-[10px]"></i>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-3">
+                    <label className="text-sm font-semibold text-slate-600 ml-1 uppercase tracking-wider flex items-center gap-2">
+                      <i className="fas fa-sliders text-blue-500"></i>
+                      Select Studio Voice Profile
+                    </label>
+                    <VoiceSelector 
+                      selectedVoice={selectedVoice} 
+                      onVoiceChange={setSelectedVoice} 
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-8">
+                   <div className="bg-blue-50/50 rounded-2xl p-5 border border-blue-100 shadow-sm">
+                      <div className="flex items-center justify-between mb-4">
+                        <input 
+                          value={convTurn1.speaker} 
+                          onChange={e => setConvTurn1({...convTurn1, speaker: e.target.value})}
+                          className="font-bold text-blue-800 bg-transparent border-none focus:ring-0 w-1/3"
+                        />
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-bold text-blue-400 uppercase">Voice:</span>
+                          <select 
+                            value={convTurn1.voice}
+                            onChange={e => setConvTurn1({...convTurn1, voice: e.target.value as VoiceName})}
+                            className="text-xs bg-white border border-blue-200 rounded-lg px-2 py-1 shadow-sm font-medium text-slate-600"
+                          >
+                            {VOICES.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="relative">
+                        <textarea
+                          value={convTurn1.text}
+                          onChange={e => setConvTurn1({...convTurn1, text: e.target.value})}
+                          className="w-full bg-slate-900 rounded-xl border-none p-4 text-white shadow-inner placeholder:text-slate-500 focus:ring-2 focus:ring-blue-500 transition-all text-base min-h-[120px]"
+                          placeholder="Speaker 1 line..."
+                          maxLength={MAX_CHARS}
+                        />
+                      </div>
+                   </div>
+
+                   <div className="bg-orange-50/50 rounded-2xl p-5 border border-orange-100 shadow-sm">
+                      <div className="flex items-center justify-between mb-4">
+                        <input 
+                          value={convTurn2.speaker} 
+                          onChange={e => setConvTurn2({...convTurn2, speaker: e.target.value})}
+                          className="font-bold text-orange-800 bg-transparent border-none focus:ring-0 w-1/3"
+                        />
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-bold text-orange-400 uppercase">Voice:</span>
+                          <select 
+                            value={convTurn2.voice}
+                            onChange={e => setConvTurn2({...convTurn2, voice: e.target.value as VoiceName})}
+                            className="text-xs bg-white border border-orange-200 rounded-lg px-2 py-1 shadow-sm font-medium text-slate-600"
+                          >
+                            {VOICES.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="relative">
+                        <textarea
+                          value={convTurn2.text}
+                          onChange={e => setConvTurn2({...convTurn2, text: e.target.value})}
+                          className="w-full bg-slate-900 rounded-xl border-none p-4 text-white shadow-inner placeholder:text-slate-500 focus:ring-2 focus:ring-orange-400 transition-all text-base min-h-[120px]"
+                          placeholder="Speaker 2 line..."
+                          maxLength={MAX_CHARS}
+                        />
+                      </div>
+                   </div>
+                </div>
+              )}
+
+              {error && (
+                <div className="mt-4 p-4 bg-red-50 text-red-600 rounded-xl text-sm flex items-center gap-2 border border-red-100">
+                  <i className="fas fa-circle-exclamation"></i>
+                  {error}
+                </div>
+              )}
+
+              <div className="mt-8">
+                <button
+                  onClick={handleGenerate}
+                  disabled={isGenerating || (mode === 'single' && inputModality === 'text' && !text.trim())}
+                  className={`w-full py-5 rounded-2xl font-black text-lg flex items-center justify-center gap-3 transition-all ${
+                    isGenerating
+                      ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                      : 'bg-gradient-to-r from-blue-600 to-indigo-700 text-white hover:from-blue-700 hover:to-indigo-800 shadow-xl shadow-blue-200 active:translate-y-0.5'
+                  }`}
+                >
+                  {isGenerating ? (
+                    <>
+                      <i className="fas fa-circle-notch fa-spin"></i>
+                      Processing Multimodal Studio Engine...
+                    </>
+                  ) : (
+                    <>
+                      <i className="fas fa-wand-magic-sparkles"></i>
+                      {inputModality === 'audio' ? 'Synthesize From Audio' : (selectedVoice === 'Custom_Clone' ? 'Generate Cloned Studio Clip' : 'Generate Unlimited Audio')}
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+            
+            <div className="flex flex-wrap items-center gap-y-2 gap-x-6 text-[10px] text-slate-400 font-bold px-4 uppercase tracking-widest">
+              <span className="flex items-center gap-1.5"><i className="fas fa-infinity text-amber-500"></i> Lifetime Access</span>
+              <span className="flex items-center gap-1.5"><i className="fas fa-bolt text-blue-500"></i> Instant Render</span>
+              <span className="flex items-center gap-1.5"><i className="fas fa-shield-halved text-green-500"></i> Licensed Studio</span>
+              <span className="flex items-center gap-1.5"><i className="fas fa-wave-square text-indigo-500"></i> PCM Native</span>
+            </div>
+          </div>
+
+          <div className="lg:col-span-5">
+            <div className="sticky top-24 space-y-6">
+              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-3xl p-5 border border-slate-700 shadow-lg text-white">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 bg-amber-400 rounded-lg flex items-center justify-center text-slate-900">
+                      <i className="fas fa-star"></i>
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold">Unlimited Pro Studio</h3>
+                      <p className="text-[10px] text-slate-400 font-medium uppercase tracking-tighter">Lifetime Active Access</p>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-bold bg-slate-700 px-2 py-1 rounded-md text-slate-300">ACTIVE</span>
+                </div>
+                <div className="space-y-2 text-[11px] font-bold text-slate-400 uppercase tracking-widest">
+                  <div className="flex justify-between">
+                    <span>Voice Clones</span>
+                    <span className="text-amber-400">Unlimited</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Audio Inputs</span>
+                    <span className="text-blue-400">Unlimited</span>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fas fa-folder-open text-blue-500"></i>
+                    Studio Library
+                  </h2>
+                  <span className="text-xs bg-white border border-slate-200 text-slate-500 font-bold px-3 py-1 rounded-full shadow-sm">
+                    {history.length} Clips
+                  </span>
+                </div>
+                
+                <div className="space-y-4 max-h-[calc(100vh-450px)] overflow-y-auto pr-2 custom-scrollbar">
+                  {history.length === 0 ? (
+                    <div className="text-center py-16 bg-white rounded-3xl border border-slate-200 border-dashed">
+                      <div className="w-16 h-16 bg-slate-50 rounded-2xl flex items-center justify-center mx-auto mb-4 text-slate-200">
+                        <i className="fas fa-music text-2xl"></i>
+                      </div>
+                      <p className="text-slate-500 font-bold text-sm">Library is empty</p>
+                      <p className="text-slate-400 text-[11px] mt-1 px-10 leading-relaxed font-medium">Your unlimited realistic voice generations will appear here.</p>
+                    </div>
+                  ) : (
+                    history.map((audio) => (
+                      <AudioCard 
+                        key={audio.id} 
+                        audio={audio} 
+                        onDelete={deleteHistoryItem} 
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <footer className="mt-20 border-t border-slate-200 py-12 bg-white/50">
+        <div className="container mx-auto px-4 text-center">
+          <div className="flex items-center justify-center gap-2 mb-4">
+            <div className="w-6 h-6 bg-slate-800 rounded-md flex items-center justify-center text-white text-[10px]">
+              <i className="fas fa-shield"></i>
+            </div>
+            <p className="text-slate-800 font-bold text-sm">Enterprise Grade Synthesis</p>
+          </div>
+          <p className="text-slate-400 text-xs font-medium tracking-wide">
+            Mastered with Gemini 2.5 Realistic TTS Engine • Native Multimodal Pipeline Enabled
+          </p>
+          <div className="flex justify-center gap-8 mt-6">
+             <i className="fab fa-react text-slate-300 hover:text-blue-500 transition-colors cursor-pointer text-xl"></i>
+             <i className="fab fa-google text-slate-300 hover:text-blue-500 transition-colors cursor-pointer text-xl"></i>
+             <i className="fas fa-waveform text-slate-300 hover:text-blue-500 transition-colors cursor-pointer text-xl"></i>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+};
+
+export default App;
